@@ -86,6 +86,13 @@ default `~/.local/state/xmpp-alerts/omemo.json`. You can change it with
   members as a new device for the bot.
 - Concurrent runs share it safely: each run holds a lock on it while it works.
 
+You'll also see an empty `omemo.json.lock` next to it. That's expected. The
+lock is held on the open file, not by the file existing, and the OS releases it
+when a run exits (even after a crash), so a leftover lock file never blocks
+anything. It is deliberately not deleted after each run, because that would let
+two runs lock different copies of the file at the same time. You can delete it
+when no run is in progress; the next run recreates it.
+
 ## From Python
 
 ```python
