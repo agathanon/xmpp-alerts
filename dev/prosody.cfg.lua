@@ -1,6 +1,6 @@
 -- Minimal Prosody for local testing of xmpp-alert. Not for production.
 admins = { "admin@localhost" }
-modules_enabled = { "disco", "roster", "saslauth", "tls", "ping", "register" }
+modules_enabled = { "disco", "roster", "saslauth", "tls", "ping", "register", "pep" }
 allow_registration = false
 c2s_require_encryption = true
 authentication = "internal_hashed"

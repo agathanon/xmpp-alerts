@@ -9,6 +9,7 @@ from pathlib import Path
 from . import config as config_mod
 from .client import AlertError, send_alert
 from .config import ConfigError
+from .omemo import default_store_path
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -21,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "The account password is read from $XMPP_ALERTS_PASSWORD. "
             "Exit codes: 0 sent, 1 config/usage error, 2 connect/auth failed, "
-            "3 room join failed, 4 timeout."
+            "3 room join failed or message rejected, 4 timeout, 5 OMEMO encryption not possible."
         ),
     )
     p.add_argument(
@@ -35,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         help=f"config file (default: {config_mod.default_path()})",
+    )
+    p.add_argument(
+        "--omemo-store",
+        type=Path,
+        help=f"OMEMO keystore file (default: omemo_store from config, else {default_store_path()})",
     )
     p.add_argument("--nick", help="nickname to use in the room (overrides config)")
     p.add_argument("--timeout", type=float, help="overall timeout in seconds (overrides config)")
@@ -69,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
     # slixmpp logs its own ERRORs for failures we already report on stderr.
     slixmpp_level = {0: logging.CRITICAL, 1: logging.WARNING}.get(args.verbose, logging.DEBUG)
     logging.getLogger("slixmpp").setLevel(slixmpp_level)
+    logging.getLogger("omemo").setLevel(slixmpp_level)
+    # Our own warnings (e.g. reduced OMEMO coverage) are actionable, so show them by default.
+    logging.getLogger("xmpp_alerts").setLevel(min(level, logging.WARNING))
 
     try:
         cfg = config_mod.load(args.config)
@@ -77,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
             overrides["nick"] = args.nick
         if args.timeout is not None:
             overrides["timeout"] = args.timeout
+        if args.omemo_store:
+            overrides["omemo_store"] = args.omemo_store
         cfg = dataclasses.replace(cfg, **overrides)
         room = cfg.resolve_room(args.room)
         message = read_message(args.message)

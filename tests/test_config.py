@@ -110,3 +110,37 @@ def test_resolve_no_room(tmp_path):
     cfg = load(write(tmp_path, 'jid = "bot@example.org"\n'), ENV)
     with pytest.raises(ConfigError, match="no room given"):
         cfg.resolve_room(None)
+
+
+def test_encryption_defaults_to_omemo(cfg):
+    assert cfg.encryption == "omemo"
+    assert cfg.resolve_room("ops").encryption == "omemo"
+    assert cfg.resolve_room("dev@conference.example.org").encryption == "omemo"
+    assert cfg.omemo_store is None
+
+
+def test_encryption_global_and_per_room(tmp_path):
+    path = write(
+        tmp_path,
+        """
+        jid = "bot@example.org"
+        encryption = "none"
+        omemo_store = "~/keys/omemo.json"
+        [rooms.secure]
+        jid = "secure@conference.example.org"
+        encryption = "omemo"
+        [rooms.open]
+        jid = "open@conference.example.org"
+        """,
+    )
+    cfg = load(path, ENV)
+    assert cfg.rooms["secure"].encryption == "omemo"
+    assert cfg.rooms["open"].encryption == "none"
+    assert cfg.resolve_room("x@conference.example.org").encryption == "none"
+    assert cfg.omemo_store.is_absolute() and cfg.omemo_store.name == "omemo.json"
+
+
+@pytest.mark.parametrize("text", ['encryption = "pgp"\n', '[rooms.x]\njid = "x@c.example.org"\nencryption = 1\n'])
+def test_bad_encryption(tmp_path, text):
+    with pytest.raises(ConfigError, match="encryption"):
+        load(write(tmp_path, 'jid = "bot@example.org"\n' + text), ENV)

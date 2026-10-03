@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PASSWORD_ENV = "XMPP_ALERTS_PASSWORD"
+ENCRYPTION_MODES = ("omemo", "none")
 
 
 class ConfigError(Exception):
@@ -16,6 +17,7 @@ class ConfigError(Exception):
 class Room:
     jid: str
     password: str | None = None
+    encryption: str = "omemo"
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,8 @@ class Config:
     timeout: float = 15.0
     host: str | None = None
     port: int | None = None
+    encryption: str = "omemo"
+    omemo_store: Path | None = None
     rooms: dict[str, Room] = field(default_factory=dict)
 
     def resolve_room(self, name: str | None) -> Room:
@@ -38,7 +42,7 @@ class Config:
             return self.rooms[name]
         if "@" not in name:
             raise ConfigError(f"unknown room alias {name!r} (not a JID and not in [rooms])")
-        return Room(jid=name)
+        return Room(jid=name, encryption=self.encryption)
 
 
 def default_path() -> Path:
@@ -66,11 +70,17 @@ def load(path: Path | None = None, env: dict[str, str] | None = None) -> Config:
     if not password:
         raise ConfigError(f"{PASSWORD_ENV} is not set")
 
+    encryption = _encryption(data, path, "encryption", "omemo")
+
     rooms = {}
     for alias, room in data.get("rooms", {}).items():
         if not isinstance(room, dict) or "jid" not in room:
             raise ConfigError(f"{path}: [rooms.{alias}] needs a 'jid'")
-        rooms[alias] = Room(jid=room["jid"], password=room.get("password"))
+        rooms[alias] = Room(
+            jid=room["jid"],
+            password=room.get("password"),
+            encryption=_encryption(room, path, f"rooms.{alias}.encryption", encryption),
+        )
 
     host, port = data.get("host"), data.get("port")
     if (host is None) != (port is None):
@@ -84,5 +94,14 @@ def load(path: Path | None = None, env: dict[str, str] | None = None) -> Config:
         timeout=float(data.get("timeout", Config.timeout)),
         host=host,
         port=port,
+        encryption=encryption,
+        omemo_store=Path(data["omemo_store"]).expanduser() if "omemo_store" in data else None,
         rooms=rooms,
     )
+
+
+def _encryption(table: dict, path: Path, key: str, default: str) -> str:
+    value = table.get("encryption", default)
+    if value not in ENCRYPTION_MODES:
+        raise ConfigError(f"{path}: '{key}' must be one of {', '.join(ENCRYPTION_MODES)}")
+    return value

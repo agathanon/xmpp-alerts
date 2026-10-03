@@ -5,10 +5,12 @@ import logging
 import ssl
 
 import slixmpp
-from slixmpp import Presence
-from slixmpp.exceptions import PresenceError
+from omemo.session_manager import NoEligibleDevices
+from slixmpp import JID, Message, Presence
+from slixmpp.exceptions import IqError, PresenceError
 
 from .config import Config, Room
+from .omemo import JSONFileStorage, KeystoreError, default_store_path
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +42,16 @@ class JoinError(AlertError):
     exit_code = 3
 
 
+class SendRejected(AlertError):
+    exit_code = 3
+
+
 class AlertTimeout(AlertError):
     exit_code = 4
+
+
+class EncryptionFailed(AlertError):
+    exit_code = 5
 
 
 def send_alert(config: Config, room: Room, message: str, *, insecure: bool = False) -> None:
@@ -54,6 +64,10 @@ async def send_alert_async(
 ) -> None:
     xmpp = slixmpp.ClientXMPP(config.jid, config.password)
     xmpp.register_plugin("xep_0045")
+    keystore = None
+    if room.encryption == "omemo":
+        keystore = JSONFileStorage(config.omemo_store or default_store_path())
+        xmpp.register_plugin("xep_0384", {"keystore": keystore})
     if insecure:
         xmpp.ssl_context.check_hostname = False
         xmpp.ssl_context.verify_mode = ssl.CERT_NONE
@@ -82,24 +96,41 @@ async def send_alert_async(
     stage = "connecting"
     try:
         async with asyncio.timeout(config.timeout):
+            if keystore:
+                stage = f"waiting for the OMEMO keystore lock on {keystore.path}"
+                await keystore.open()
+                stage = "connecting"
             xmpp.connect(config.host, config.port)
             await session
+
+            if keystore:
+                stage = "setting up OMEMO"
+                await _setup_omemo(xmpp)
 
             stage = f"joining {room.jid}"
             nick = await _join(xmpp, room, config.nick)
 
-            stage = "sending"
-            xmpp.send_message(mto=room.jid, mbody=message, mtype="groupchat")
+            msg = xmpp.make_message(mto=room.jid, mbody=message, mtype="groupchat")
+            if keystore:
+                stage = "encrypting"
+                msg = await _encrypt(xmpp, room, msg)
+
+            stage = "waiting for the room to confirm the message"
+            await _send_confirmed(xmpp, room, msg)
             xmpp.plugin["xep_0045"].leave_muc(room.jid, nick)
     except TimeoutError:
         # Can't use session.done() here: the timeout cancels the pending future.
         if stage == "connecting" and connect_errors:
             raise ConnectError(f"could not connect: {connect_errors[-1]}") from None
         raise AlertTimeout(f"timed out after {config.timeout:g}s while {stage}") from None
+    except KeystoreError as e:
+        raise AlertError(str(e)) from None
     finally:
         xmpp.cancel_connection_attempt()
         # disconnect() flushes the send queue (message, leave) before closing the stream.
         await xmpp.disconnect(wait=DISCONNECT_WAIT)
+        if keystore:
+            keystore.close()
 
 
 async def _join(xmpp: slixmpp.ClientXMPP, room: Room, base_nick: str) -> str:
@@ -161,3 +192,97 @@ async def _join_once(xmpp: slixmpp.ClientXMPP, room: Room, nick: str) -> Presenc
         raise PresenceError(error.result())
     pres, *_ = join.result()
     return pres
+
+
+async def _send_confirmed(xmpp: slixmpp.ClientXMPP, room: Room, msg: Message) -> None:
+    """Send, then wait for the room to reflect the message back (or reject it).
+
+    The reflection means the room accepted and broadcast it, which is a stronger
+    guarantee than the stanza leaving our socket.
+    """
+    room_bare = JID(room.jid).bare
+    outcome: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def on_reflection(reply: Message):
+        if reply["id"] == msg["id"] and reply["from"].bare == room_bare and not outcome.done():
+            outcome.set_result(None)
+
+    def on_error(reply: Message):
+        if reply["id"] == msg["id"] and reply["from"].bare == room_bare and not outcome.done():
+            condition = reply["error"]["condition"]
+            text = reply["error"]["text"]
+            detail = f"{condition}: {text}" if text else condition
+            outcome.set_exception(SendRejected(f"{room.jid} rejected the message ({detail})"))
+
+    xmpp.add_event_handler("groupchat_message", on_reflection)
+    xmpp.add_event_handler("groupchat_message_error", on_error)
+    try:
+        msg.send()
+        await outcome
+    finally:
+        xmpp.del_event_handler("groupchat_message", on_reflection)
+        xmpp.del_event_handler("groupchat_message_error", on_error)
+
+
+async def _setup_omemo(xmpp: slixmpp.ClientXMPP) -> None:
+    """Load or create our OMEMO identity and make sure our device and keys are published."""
+    try:
+        await xmpp.plugin["xep_0384"].get_session_manager()
+    except Exception as e:
+        raise EncryptionFailed(
+            f"OMEMO setup failed ({e!r}); the server must support PEP (XEP-0163)"
+        ) from None
+
+
+async def _encrypt(xmpp: slixmpp.ClientXMPP, room: Room, msg: Message) -> Message:
+    """Encrypt for every room member we can; members without usable devices are skipped."""
+    recipients = await _recipients(xmpp, room)
+    omemo = xmpp.plugin["xep_0384"]
+    while recipients:
+        try:
+            encrypted, errors = await omemo.encrypt_message(msg, recipients)
+        except NoEligibleDevices as e:
+            log.info("no OMEMO device to encrypt for: %s", ", ".join(sorted(e.bare_jids)))
+            recipients = {jid for jid in recipients if jid.bare not in e.bare_jids}
+            continue
+        except Exception as e:
+            raise EncryptionFailed(f"OMEMO encryption failed: {e!r}") from None
+        for err in errors:
+            log.info("could not encrypt for %s/%d: %r", err.bare_jid, err.device_id, err.exception)
+        return encrypted
+    raise EncryptionFailed(f"no member of {room.jid} has an OMEMO device to encrypt for")
+
+
+async def _recipients(xmpp: slixmpp.ClientXMPP, room: Room) -> set[JID]:
+    """Real JIDs of the room's affiliated members plus anyone currently in it, minus ourselves."""
+    room_jid = JID(room.jid)
+    muc = xmpp.plugin["xep_0045"]
+
+    info = await xmpp.plugin["xep_0030"].get_info(jid=room_jid)
+    if "muc_nonanonymous" not in info["disco_info"]["features"]:
+        raise EncryptionFailed(
+            f"{room.jid} is anonymous, so members' devices can't be looked up for OMEMO; "
+            "make the room non-anonymous or set encryption = \"none\" for it"
+        )
+
+    bare_jids: set[str] = set()
+    try:
+        for affiliation in ("owner", "admin", "member"):
+            members = await muc.get_affiliation_list(room_jid, affiliation)
+            bare_jids.update(JID(j).bare for j in members)  # returns str despite the hint
+    except IqError as e:
+        log.warning(
+            "cannot fetch the member list of %s (%s); encrypting only for members currently "
+            "in the room. Make the bot a room admin to fix this.",
+            room.jid,
+            e.condition,
+        )
+    for occupant in muc.get_roster(room_jid):
+        real_jid = muc.get_jid_property(room_jid, occupant, "jid")
+        if real_jid:
+            bare_jids.add(JID(real_jid).bare)
+
+    bare_jids.discard(xmpp.boundjid.bare)
+    if not bare_jids:
+        raise EncryptionFailed(f"found no members of {room.jid} to encrypt for")
+    return {JID(j) for j in bare_jids}

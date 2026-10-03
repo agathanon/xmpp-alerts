@@ -5,6 +5,8 @@ jid = "alertbot@example.org"       # bot account (must already be a member of th
 nick = "alertbot"                  # nickname in rooms; -2, -3, ... is tried if taken
 default_room = "ops"               # alias or room JID used when --room is omitted
 timeout = 15                       # seconds for the whole connect/join/send
+encryption = "omemo"               # default for all rooms: "omemo" or "none"
+# omemo_store = "~/.local/state/xmpp-alerts/omemo.json"   # OMEMO keystore (this is the default)
 
 # Only needed if SRV records don't point at your server:
 # host = "xmpp.example.org"
@@ -16,3 +18,4 @@ jid = "ops@conference.example.org"
 [rooms.backups]
 jid = "backups@conference.example.org"
 # password = "..."                 # only for password-protected rooms
+encryption = "none"                # per-room override

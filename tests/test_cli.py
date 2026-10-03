@@ -3,7 +3,7 @@ import io
 import pytest
 
 from xmpp_alerts import cli
-from xmpp_alerts.client import AlertTimeout, ConnectError, JoinError
+from xmpp_alerts.client import AlertTimeout, ConnectError, EncryptionFailed, JoinError
 from xmpp_alerts.config import PASSWORD_ENV
 
 
@@ -85,6 +85,17 @@ def test_overrides(config_path, sent):
     assert insecure is True
 
 
+def test_omemo_store_option(config_path, sent, tmp_path):
+    store = tmp_path / "keys.json"
+    assert cli.main(["-c", str(config_path), "--omemo-store", str(store), "hi"]) == 0
+    assert sent[0][0].omemo_store == store
+
+
+def test_omemo_store_defaults_to_config(config_path, sent):
+    assert cli.main(["-c", str(config_path), "hi"]) == 0
+    assert sent[0][0].omemo_store is None
+
+
 def test_config_error(tmp_path, sent, capsys):
     assert cli.main(["-c", str(tmp_path / "missing.toml"), "hi"]) == 1
     assert "not found" in capsys.readouterr().err
@@ -92,7 +103,12 @@ def test_config_error(tmp_path, sent, capsys):
 
 @pytest.mark.parametrize(
     "exc, code",
-    [(ConnectError("auth"), 2), (JoinError("members-only"), 3), (AlertTimeout("slow"), 4)],
+    [
+        (ConnectError("auth"), 2),
+        (JoinError("members-only"), 3),
+        (AlertTimeout("slow"), 4),
+        (EncryptionFailed("anonymous room"), 5),
+    ],
 )
 def test_alert_errors_map_to_exit_codes(config_path, monkeypatch, capsys, exc, code):
     def fail(*args, **kwargs):
