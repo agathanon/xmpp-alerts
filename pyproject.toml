@@ -1,0 +1,24 @@
+[project]
+name = "xmpp-alerts"
+version = "0.1.0"
+description = "Send short alerts to XMPP multi-user chat rooms"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "slixmpp>=1.17.0",
+]
+
+[project.scripts]
+xmpp-alert = "xmpp_alerts.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10,<0.11"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

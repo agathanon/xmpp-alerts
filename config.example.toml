@@ -1,0 +1,18 @@
+# Copy to ~/.config/xmpp-alerts/config.toml
+# The account password is NOT stored here: set XMPP_ALERTS_PASSWORD in the environment.
+
+jid = "alertbot@example.org"       # bot account (must already be a member of the rooms)
+nick = "alertbot"                  # nickname in rooms; -2, -3, ... is tried if taken
+default_room = "ops"               # alias or room JID used when --room is omitted
+timeout = 15                       # seconds for the whole connect/join/send
+
+# Only needed if SRV records don't point at your server:
+# host = "xmpp.example.org"
+# port = 5222
+
+[rooms.ops]
+jid = "ops@conference.example.org"
+
+[rooms.backups]
+jid = "backups@conference.example.org"
+# password = "..."                 # only for password-protected rooms

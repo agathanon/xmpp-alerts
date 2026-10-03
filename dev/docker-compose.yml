@@ -1,0 +1,14 @@
+# Local XMPP server for manual testing: docker compose -f dev/docker-compose.yml up -d
+# Accounts: admin@localhost / admin, alertbot@localhost / alertbot
+services:
+  prosody:
+    image: prosodyim/prosody:13.0
+    ports:
+      - "127.0.0.1:5222:5222"
+    volumes:
+      - ./prosody.cfg.lua:/etc/prosody/prosody.cfg.lua:ro
+    command: >
+      sh -c "prosodyctl register admin localhost admin &&
+             prosodyctl register alertbot localhost alertbot &&
+             exec runuser -u prosody -- prosody"
+    entrypoint: []
