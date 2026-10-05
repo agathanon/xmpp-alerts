@@ -238,6 +238,13 @@ async def _encrypt(xmpp: slixmpp.ClientXMPP, room: Room, msg: Message) -> Messag
     """Encrypt for every room member we can; members without usable devices are skipped."""
     recipients = await _recipients(xmpp, room)
     omemo = xmpp.plugin["xep_0384"]
+    # Re-download every member's device list. The plugin otherwise subscribes once and relies
+    # on PEP pushes to keep its cache current, but this bot is offline when members add
+    # devices, so it never receives those pushes and new devices would never be encrypted for.
+    try:
+        await omemo.refresh_device_lists(recipients, force_download=True)
+    except Exception as e:
+        raise EncryptionFailed(f"could not fetch OMEMO device lists: {e!r}") from None
     while recipients:
         try:
             encrypted, errors = await omemo.encrypt_message(msg, recipients)

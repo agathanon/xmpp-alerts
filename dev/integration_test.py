@@ -32,6 +32,7 @@ ANON = "anon@conference.localhost"    # members-only, anonymous: OMEMO impossibl
 QUIET = "quiet@conference.localhost"  # open but moderated: the bot joins without voice
 BOT = "alertbot@localhost"
 GHOST = "ghost@localhost"             # a member with no account and so no OMEMO devices
+OBSERVER_NICKS = {"admin", "admin-phone"}  # the test's own sessions, ignored by observers
 
 CFG.write_text(f'''
 jid = "{BOT}"
@@ -76,11 +77,11 @@ async def run_cli(*args, password="alertbot", stdin=None, config=CFG):
     return p.returncode, out.decode(), err.decode()
 
 
-async def arrived(body, *, encrypted=True, nick="alertbot", wait=5.0):
+async def arrived(body, *, encrypted=True, nick="alertbot", wait=5.0, sink=received):
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
-        if (nick, body, encrypted) in received:
-            received.remove((nick, body, encrypted))
+        if (nick, body, encrypted) in sink:
+            sink.remove((nick, body, encrypted))
             return True
         await asyncio.sleep(0.1)
     return False
@@ -105,17 +106,21 @@ async def bot_device_count(admin):
     return len(await sm.get_device_information(BOT))
 
 
-async def main():
-    admin_store = JSONFileStorage(TMP / "admin-omemo.json")
-    await admin_store.open()
-    admin = slixmpp.ClientXMPP("admin@localhost", "admin")
-    admin.ssl_context.check_hostname = False
-    admin.ssl_context.verify_mode = ssl.CERT_NONE
+async def observer(store_path, nick, sink):
+    """Connect an admin@localhost session that is its own OMEMO device.
+
+    Encrypted and plaintext messages from others land in `sink` as (nick, body, encrypted).
+    """
+    store = JSONFileStorage(store_path)
+    await store.open()
+    client = slixmpp.ClientXMPP("admin@localhost", "admin")
+    client.ssl_context.check_hostname = False
+    client.ssl_context.verify_mode = ssl.CERT_NONE
     for plugin in ("xep_0045", "xep_0004"):
-        admin.register_plugin(plugin)
-    admin.register_plugin("xep_0384", {"keystore": admin_store})
-    omemo = admin.plugin["xep_0384"]
-    muc = admin.plugin["xep_0045"]
+        client.register_plugin(plugin)
+    client.register_plugin("xep_0384", {"keystore": store})
+    omemo = client.plugin["xep_0384"]
+    muc = client.plugin["xep_0045"]
 
     # decrypt_message() looks up the sender's real JID in the room roster, but it runs as
     # a task, and by then the bot's leave presence (sent right after the message) may have
@@ -134,27 +139,33 @@ async def main():
         return value
 
     muc.get_jid_property = get_jid_property
-    admin.add_event_handler("groupchat_presence", remember)
+    client.add_event_handler("groupchat_presence", remember)
 
     async def on_groupchat(msg):
-        if msg["subject"] or msg["mucnick"] == "admin":
+        if msg["subject"] or msg["mucnick"] in OBSERVER_NICKS:
             return
         if omemo.is_encrypted(msg):
             try:
                 decrypted, _device = await omemo.decrypt_message(msg)
             except Exception as e:
-                print("admin could not decrypt:", repr(e))
+                print(f"{nick} could not decrypt:", repr(e))
                 return
-            received.append((msg["mucnick"], decrypted["body"], True))
+            sink.append((msg["mucnick"], decrypted["body"], True))
         elif msg["body"]:
-            received.append((msg["mucnick"], msg["body"], False))
+            sink.append((msg["mucnick"], msg["body"], False))
 
     started = asyncio.get_running_loop().create_future()
-    admin.add_event_handler("session_start", lambda _: started.set_result(None))
-    admin.add_event_handler("groupchat_message", on_groupchat)
-    admin.connect("127.0.0.1", 5222)
+    client.add_event_handler("session_start", lambda _: started.set_result(None))
+    client.add_event_handler("groupchat_message", on_groupchat)
+    client.connect("127.0.0.1", 5222)
     await asyncio.wait_for(started, 10)
     await asyncio.wait_for(omemo.get_session_manager(), 20)
+    return client, store
+
+
+async def main():
+    admin, admin_store = await observer(TMP / "admin-omemo.json", "admin", received)
+    muc = admin.plugin["xep_0045"]
     await configure_room(admin, OPS, anonymous=False)
     await configure_room(admin, ANON, anonymous=True)
     await muc.join_muc_wait(JID(QUIET), "admin", maxstanzas=0, timeout=10)
@@ -211,6 +222,20 @@ async def main():
     # This test run's fresh keystore should add exactly one device, however many sends it made.
     check("bot reuses one OMEMO device across runs", count == devices_before + 1,
           f"before={devices_before} after={count}")
+
+    # --- a member adding a device after the bot has already sent to them ---
+    # The bot is offline when the device list changes, so it never sees the PEP push and
+    # must re-fetch member device lists itself.
+    phone_received = []
+    phone, phone_store = await observer(TMP / "admin-phone-omemo.json", "admin-phone", phone_received)
+    await phone.plugin["xep_0045"].join_muc_wait(JID(OPS), "admin-phone", maxstanzas=0, timeout=10)
+    rc, out, err = await run_cli("--insecure", "after new device")
+    old_ok = await arrived("after new device")
+    phone_ok = await arrived("after new device", sink=phone_received)
+    check("member's new device can decrypt", rc == 0 and old_ok and phone_ok,
+          f"rc={rc} err={err!r} old device={old_ok} new device={phone_ok}")
+    await phone.disconnect()
+    phone_store.close()
 
     # --- plaintext and unsuitable rooms ---
     rc, out, err = await run_cli("--insecure", "-r", "plain", "plain text")
